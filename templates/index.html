@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>集中力検知とYouTube再生</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #000;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            max-width: 1280px;
+        }
+
+        #video,
+        #overlay {
+            width: 1px;
+            /* 非表示に近いサイズ */
+            height: 1px;
+            opacity: 0;
+            /* 透明にする */
+            position: absolute;
+            /* レイアウトに影響を与えない */
+            pointer-events: none;
+            /* ユーザー操作を無効化 */
+        }
+
+        #result {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            font-size: 20px;
+            padding: 5px;
+            color: red;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 5px;
+        }
+
+        #youtube-container {
+            width: 100vw;
+            /* ビューポート幅に合わせる */
+            height: calc(100vw * 9 / 16);
+            /* 16:9の比率を維持 */
+            max-height: 100vh;
+            /* ビューポート高さを超えないように制限 */
+            overflow: hidden;
+        }
+
+        #youtube-video {
+            width: 100%;
+            height: 100%;
+            border: none;
+            /* 枠線を非表示に */
+        }
+
+
+        #dark-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: black;
+            opacity: 0;
+            /* 初期状態で透明 */
+            display: block;
+            z-index: 1000;
+            /* 全ての要素より前に表示 */
+            pointer-events: none;
+            /* クリック操作を無効化 */
+            transition: opacity 2s ease;
+            /* 暗転に2秒かける */
+        }
+
+        #dark-overlay.show {
+            opacity: 1;
+            /* 暗転中に不透明にする */
+            pointer-events: auto;
+            /* 暗転中は操作を受け付ける */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div id="result"></div>
+    </div>
+    <!-- YouTube埋め込み -->
+    <div id="youtube-container">
+        <iframe id="youtube-video" src="https://www.youtube.com/embed/F0cbwkfghAU?enablejsapi=1" frameborder="0"
+            allow="autoplay; encrypted-media" allowfullscreen>
+        </iframe>
+    </div>
+    <div id="dark-overlay"></div>
+    <script>
+        // DOM要素の取得
+        const video = document.getElementById("video");
+        const canvas = document.getElementById("overlay");
+        const ctx = canvas.getContext("2d");
+        const result = document.getElementById("result");
+        const darkOverlay = document.getElementById("dark-overlay");
+        const youtubeIframe = document.getElementById("youtube-video");
+
+        let hasFocusedOnce = false; // 最初に集中状態を検出するまで暗転しない
+        let lastDarkenTime = 0; // 最後に暗転した時間
+        let isDarkening = false; // 現在暗転中かどうか
+
+        const DARKEN_COOLDOWN = 10000; // 暗転後最低10秒間は暗転しない
+        const DARKEN_DURATION = 2000; // 暗転表示時間（2秒）
+
+        // YouTube API を利用するための iframe プレイヤーの準備
+        let youtubePlayer;
+        function onYouTubeIframeAPIReady() {
+            youtubePlayer = new YT.Player('youtube-video', {
+                events: {
+                    onReady: () => console.log("YouTubeプレイヤー準備完了"),
+                }
+            });
+        }
+
+        // カメラの起動設定
+        navigator.mediaDevices
+            .getUserMedia({ video: { width: 1280, height: 720 } })
+            .then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                });
+            })
+            .catch((err) => console.error("カメラの起動に失敗しました:", err));
+
+        // サーバーにビデオフレームを送信
+        async function sendFrame() {
+            const captureCanvas = document.createElement("canvas");
+            captureCanvas.width = video.videoWidth;
+            captureCanvas.height = video.videoHeight;
+            const captureCtx = captureCanvas.getContext("2d");
+            captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            const imageData = captureCanvas.toDataURL("image/jpeg");
+
+            try {
+                const response = await fetch("/process_frame", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ image: imageData }),
+                });
+
+                const data = await response.json();
+                console.log("サーバーレスポンス:", data);
+                if (data.image) {
+                    drawServerImage(data.image);
+                }
+                displayResult(data);
+                handleFocusState(data.focused);
+            } catch (err) {
+                console.error("サーバーエラー:", err);
+                displayError("サーバーエラー");
+            }
+        }
+
+        // サーバーから返却された画像を描画
+        function drawServerImage(base64Image) {
+            const img = new Image();
+            img.onload = () => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            };
+            img.src = base64Image;
+        }
+
+        // 結果を画面に表示
+        function displayResult(data) {
+            const focused = data.focused;
+            const reason = data.reason;
+
+            result.textContent = focused ? "集中しています" : `非集中: ${reason}`;
+            result.style.color = focused ? "green" : "red";
+        }
+
+        // 集中力の状態を処理
+        // 集中力の状態を処理
+        function handleFocusState(isFocused) {
+            const currentTime = Date.now();
+
+            if (!hasFocusedOnce) {
+                // 最初に集中を検出するまで暗転しない
+                if (isFocused) {
+                    hasFocusedOnce = true;
+                }
+                return;
+            }
+
+            if (!isDarkening && currentTime - lastDarkenTime >= DARKEN_COOLDOWN) {
+                if (!isFocused) {
+                    darkOverlay.classList.add("show"); // 暗転を有効化
+                    darkOverlay.style.pointerEvents = "auto"; // 暗転中の操作を無効化
+                    if (youtubePlayer) youtubePlayer.pauseVideo(); // YouTube動画を一時停止
+                    isDarkening = true;
+                    lastDarkenTime = currentTime;
+
+                    // 暗転解除
+                    setTimeout(() => {
+                        darkOverlay.classList.remove("show"); // 暗転を解除
+                        darkOverlay.style.pointerEvents = "none"; // 操作を有効化
+                        if (youtubePlayer) youtubePlayer.playVideo(); // YouTube動画を再開
+                        isDarkening = false;
+                    }, DARKEN_DURATION);
+                }
+            }
+        }
+
+
+        // エラー表示
+        function displayError(message) {
+            result.textContent = message;
+            result.style.color = "red";
+        }
+
+        // フレームを200msごとに送信
+        setInterval(sendFrame, 200);
+
+        // YouTube APIのロード
+        const tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        const firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    </script>
+</body>
+
+</html>
