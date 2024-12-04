@@ -1,6 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-# Install necessary dependencies
+# システム依存パッケージのインストール
 apt-get update && apt-get install -y \
-    cmake \
-    libboost-all-dev
+    build-essential cmake libboost-all-dev
+
+# MAKEFLAGSを設定して並列ビルド数を制限
+export MAKEFLAGS="-j4"
+
+# Pythonパッケージのインストール
+pip install --upgrade pip
+pip install -r requirements.txt
